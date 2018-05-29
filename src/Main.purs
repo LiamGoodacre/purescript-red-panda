@@ -1,78 +1,241 @@
 module Main where
 
 import Prelude
-import Control.Monad.Eff (Eff)
-import Control.Monad.Eff.Console (CONSOLE, log)
 
-import Control.Monad.Eff.Ref as Ref
-import Control.Plus (empty)
+import Control.Alternative
+  ( empty
+  , (<|>)
+  )
 
-import Data.Either (Either(..))
-import Data.Foldable (sequence_, traverse_, for_)
-import Data.Identity (Identity(..))
-import Data.List (List(..), (:))
-import Data.Maybe (Maybe(..))
-import Data.Profunctor.Joker (Joker(..))
-import Data.Profunctor.Star (Star(..))
+import Effect
+  ( Effect
+  )
 
-import DOM.Event.EventTarget (addEventListener, eventListener, removeEventListener, EventListener) as DOM
-import DOM.Event.Types (Event, EventType) as DOM
-import DOM.HTML (window) as DOM
-import DOM.HTML.Document (body) as DOM
-import DOM.HTML.Types (htmlDocumentToDocument, htmlElementToNode, htmlElementToElement) as DOM
-import DOM.HTML.Window (document) as DOM
-import DOM.Node.Element (setAttribute, removeAttribute) as DOM
-import DOM.Node.Types (Node, Element, elementToEventTarget) as DOM
+import Effect.Ref
+  as Ref
 
-import FRP.Event as FRP
+import Data.Foldable
+  ( traverse_
+  , for_
+  , foldMap
+  )
 
-data Value p input output
-  = Literal String        (p input String)
-  | Handler DOM.EventType (p input (DOM.Event -> Maybe output))
+import Data.Identity
+  ( Identity(..)
+  )
 
-data Change output
-  = Remove
-  | NotChanged
-  | Changed output
+import Data.List
+  ( List(..)
+  , (:)
+  )
 
-data Watcher k input output
-  = Ignoring (k (Joker Identity) input output)
-  | Watching (k (Star Change)    input output)
+import Data.Maybe
+  ( Maybe(..)
+  )
 
-newtype Result eff input output = Result
-  { onUpdate :: Maybe (input -> Eff eff Unit)
-  , cancel :: Eff eff Unit
-  , event :: FRP.Event output
-  }
+import Data.Profunctor.Joker
+  ( Joker(..)
+  )
+
+import Data.Profunctor.Star
+  ( Star(..)
+  )
+
+import Web.Event.Event
+  ( Event
+  , EventType
+  ) as Web
+
+import Web.Event.EventTarget
+  ( addEventListener
+  , eventListener
+  , removeEventListener
+  ) as Web
+
+import Web.DOM.Document
+  ( createTextNode
+  , createElement
+  ) as Web
+
+import Web.DOM.Element
+  ( setAttribute
+  , removeAttribute
+  , toEventTarget
+  , toNode
+  ) as Web.Element
+
+import Web.DOM.Node
+  ( appendChild
+  , removeChild
+  ) as Web
+
+import Web.DOM.Text
+  ( toNode
+  ) as Web.Text
+
+import Web.DOM
+  ( Node
+  , Element
+  ) as Web
+
+import Web.HTML
+  ( window
+  ) as Web
+
+import Web.HTML.HTMLDocument
+  ( body
+  , toDocument
+  ) as Web
+
+import Web.HTML.HTMLElement
+  ( toElement
+  , toNode
+  ) as Web.HTML.HTMLElement
+
+import Web.HTML.Window
+  ( document
+  ) as Web
+
+import FRP.Event
+  as FRP
+
+
+data Value
+  (operation :: Type -> Type -> Type)
+  (input :: Type)
+  (output :: Type) =
+
+    Literal
+      String
+      (operation input String) |
+
+    Handler
+      Web.EventType
+      (operation input (Web.Event -> Maybe output))
+
+data Change
+  (output :: Type) =
+    Remove |
+    NotChanged |
+    Changed output
+
+data Watcher
+  (context :: (Type -> Type -> Type) -> Type -> Type -> Type)
+  (input :: Type)
+  (output :: Type) =
+
+    Ignoring
+      (context (Joker Identity) input output) |
+
+    Watching
+      (context (Star Change) input output)
+
+newtype Result
+  (input :: Type)
+  (output :: Type) =
+
+    Result
+      { onUpdate :: Maybe (input -> Effect Unit)
+      , cancel :: Effect Unit
+      --event :: Alternate FRP.Event output
+      , event :: FRP.Event output
+      }
+
+--derive newtype instace semigroupResult :: Semigroup (Result input output)
+--derive newtype instace monoidResult :: Monoid (Result input output)
+
+instance semigroupResult ::
+  Semigroup (Result input output)
+  where
+    append (Result l) (Result r) =
+      Result
+        { onUpdate: l.onUpdate <> r.onUpdate
+        , cancel: l.cancel <> r.cancel
+        , event: l.event <|> r.event
+        }
+
+instance monoidResult ::
+  Monoid (Result input output)
+  where
+    mempty = Result
+      { onUpdate: mempty
+      , cancel: mempty
+      , event: empty
+      }
+
+newtype Key = Key (List String)
+
+data Component
+  (operation :: Type -> Type -> Type)
+  (input :: Type)
+  (output :: Type) =
+
+    Component
+      Key
+      (operation input (Node input output))
+
+data Node
+  (input :: Type)
+  (output :: Type) =
+
+  TextNode
+    String |
+
+  TagNode
+    { tag :: String
+    , properties :: List (Watcher Value input output)
+    , children :: List (Watcher Component input output)
+    }
+
+the ::
+  forall arg input output .
+  (arg -> Node input output) ->
+  (arg -> Watcher Component input output)
+the f o =
+  Ignoring (Component (Key Nil) (Joker (Identity (f o))))
+
+infix 4 the as !
+
+watchingC ::
+  forall input output .
+  Key ->
+  (input -> Change (Node input output)) ->
+  Watcher Component input output
+watchingC k f =
+  Watching (Component k (Star f))
 
 renderLiteral ::
   String ->
+  Web.Element ->
   String ->
-  DOM.Element ->
-  Eff _ (Eff _ Unit)
-renderLiteral key content element = do
-  DOM.setAttribute key content element
-  pure (DOM.removeAttribute key element)
+  Effect (Effect Unit)
+renderLiteral key element content = do
+  Web.Element.setAttribute key content element
+  pure (Web.Element.removeAttribute key element)
 
 renderHandler ::
-  DOM.EventType ->
-  (DOM.Event -> Eff _ Unit) ->
-  DOM.Element ->
-  Eff _ (Eff _ Unit)
-renderHandler eventType onEvent element = do
-  let eventTarget = DOM.elementToEventTarget element
-      listener    = DOM.eventListener onEvent
-  DOM.addEventListener eventType listener false eventTarget
-  pure (DOM.removeEventListener eventType listener false eventTarget)
+  Web.EventType ->
+  Web.Element ->
+  (Web.Event -> Effect Unit) ->
+  Effect (Effect Unit)
+renderHandler eventType element onEvent = do
+  let
+    eventTarget = Web.Element.toEventTarget element
 
-renderValue :: forall input output.
+  listener <- Web.eventListener onEvent
+
+  Web.addEventListener eventType listener false eventTarget
+  pure (Web.removeEventListener eventType listener false eventTarget)
+
+renderIgnoringValue ::
+  forall input output .
+  Web.Element ->
   Value (Joker Identity) input output ->
-  DOM.Element ->
-  Eff _ (Result _ input output)
-renderValue value element =
+  Effect (Result input output)
+renderIgnoringValue element value =
   case value of
     Literal key (Joker (Identity content)) -> do
-      cancel <- renderLiteral key content element
+      cancel <- renderLiteral key element content
       pure (Result
         { onUpdate: Nothing
         , cancel
@@ -81,41 +244,43 @@ renderValue value element =
 
     Handler eventType (Joker (Identity onEvent)) -> do
       { push, event } ← FRP.create
-      cancel <- renderHandler eventType (\e -> traverse_ push (onEvent e)) element
+      cancel <- renderHandler eventType element (\e -> traverse_ push (onEvent e))
       pure (Result
         { onUpdate: Nothing
         , cancel
         , event
         })
 
-renderAttrWatching :: forall input output.
+renderWatchingValue ::
+  forall input output .
+  Web.Element ->
   Value (Star Change) input output ->
-  DOM.Element ->
-  Eff _ (Result _ input output)
-renderAttrWatching value element = do
-  let noop = pure unit
-  cancelRef <- Ref.newRef noop
+  Effect (Result input output)
+renderWatchingValue element value = do
+  cancelRef <- Ref.new mempty
 
-  let cancel = do
-        cancelAttr <- Ref.readRef cancelRef
-        Ref.writeRef cancelRef noop
-        cancelAttr
+  let
+    cancel = do
+      cancelAttr <- Ref.read cancelRef
+      Ref.write mempty cancelRef
+      cancelAttr
 
-  let observe :: forall value.
-        (value -> DOM.Element -> Eff _ (Eff _ Unit)) ->
-        Change value ->
-        Eff _ Unit
-      observe render = case _ of
-        Remove -> cancel
-        NotChanged -> pure unit
-        Changed content -> do
-          cancelContent <- render content element
-          Ref.writeRef cancelRef cancelContent
+    observe ::
+      forall value .
+      (value -> Effect (Effect Unit)) ->
+      Change value ->
+      Effect Unit
+    observe render = case _ of
+      Remove -> cancel
+      NotChanged -> pure unit
+      Changed content -> do
+        cancelContent <- render content
+        Ref.write cancelContent cancelRef
 
   case value of
     Literal key (Star observer) ->
       pure (Result
-        { onUpdate: Just (observe (renderLiteral key) <<< observer)
+        { onUpdate: Just (observe (renderLiteral key element) <<< observer)
         , cancel
         , event: empty
         })
@@ -123,8 +288,9 @@ renderAttrWatching value element = do
     Handler eventType (Star observer) -> do
       { push, event } <- FRP.create
 
-      let render onEvent =
-            renderHandler eventType (traverse_ push <<< onEvent)
+      let
+        render onEvent =
+          renderHandler eventType element (traverse_ push <<< onEvent)
 
       pure (Result
         { onUpdate: Just (observe render <<< observer)
@@ -132,28 +298,140 @@ renderAttrWatching value element = do
         , event
         })
 
-renderProperty :: forall input output.
+renderProperty ::
+  forall input output .
+  Web.Element ->
   Watcher Value input output ->
-  DOM.Element ->
-  Eff _ (Result _ input output)
-renderProperty = case _ of
-  Ignoring value -> renderValue value
-  Watching value -> renderAttrWatching value
+  Effect (Result input output)
+renderProperty element = case _ of
+  Ignoring value -> renderIgnoringValue element value
+  Watching value -> renderWatchingValue element value
 
-main :: Eff _ Unit
+renderIgnoringComponent ::
+  forall input output .
+  Web.Node ->
+  Component (Joker Identity) input output ->
+  Effect (Result input output)
+renderIgnoringComponent parent component =
+  case component of
+    Component key (Joker (Identity (TextNode text))) -> do
+      document <- Web.toDocument <$> (Web.document =<< Web.window)
+      textElement <- Web.createTextNode text document
+
+      let
+        textNode = Web.Text.toNode textElement
+
+      _ <- Web.appendChild textNode parent
+      pure (Result
+        { onUpdate: Nothing
+        , cancel: Web.removeChild textNode parent $> unit
+        , event: empty
+        })
+
+    Component key (Joker (Identity (TagNode config))) -> do
+      document <- Web.toDocument <$> (Web.document =<< Web.window)
+      tagElement <- Web.createElement config.tag document
+
+      let
+        tagNode = Web.Element.toNode tagElement
+
+        self = Result
+          { onUpdate: Nothing
+          , cancel: Web.removeChild tagNode parent $> unit
+          , event: empty
+          }
+
+      properties <- foldMap (renderProperty tagElement) config.properties
+
+      -- TODO: actually use children keys
+      children <- foldMap (renderComponent tagNode) config.children
+
+      _ <- Web.appendChild tagNode parent
+      pure (children <> properties <> self)
+
+renderWatchingComponent ::
+  forall input output .
+  Web.Node ->
+  Component (Star Change) input output ->
+  Effect (Result input output)
+renderWatchingComponent node component = do
+  childRef <- Ref.new mempty
+  { push, event } <- FRP.create
+
+  let
+    cancel = do
+      cancelChild <- Ref.read childRef
+      Ref.write mempty childRef
+      cancelChild
+
+    observe render update = case _ of
+      Remove -> cancel
+      NotChanged -> pure unit
+      Changed content -> do
+        cancel
+        Result child <- render content
+        cancelChild <- FRP.subscribe child.event push
+        Ref.write (child.cancel *> cancelChild) childRef
+        for_ child.onUpdate (_ $ update)
+
+  case component of
+    Component key (Star observer) ->
+      let
+        onUpdate = Just \update ->
+          observe (renderIgnoringComponent node <<< Component key <<< Joker <<< Identity) update $
+          observer update
+
+      in
+        pure (Result
+          { onUpdate
+          , cancel
+          , event
+          })
+
+renderComponent ::
+  forall input output .
+  Web.Node ->
+  Watcher Component input output ->
+  Effect (Result input output)
+renderComponent node = case _ of
+  Ignoring component -> renderIgnoringComponent node component
+  Watching component -> renderWatchingComponent node component
+
+main :: Effect Unit
 main = do
-  window <- DOM.window
-  document <- DOM.document window
-  DOM.body document >>= traverse_ \body -> do
-    Result result <- renderProperty foo (DOM.htmlElementToElement body)
+  window <- Web.window
+  document <- Web.document window
+  Web.body document >>= traverse_ \bodyHTML -> do
+
+    let
+      bodyElement = Web.HTML.HTMLElement.toElement bodyHTML
+      bodyNode = Web.HTML.HTMLElement.toNode bodyHTML
+
+    Result result <- renderComponent bodyNode bar
+    --Result result <- renderProperty bodyElement foo
     for_ result.onUpdate \onUpdate -> do
       onUpdate true
       onUpdate false
+      onUpdate true
     pure unit
 
+foo :: forall t. Watcher Value Boolean t
 foo = Watching
   (Literal "style"
     (Star case _ of
-      true -> Changed "background-color: blue"
+      true -> Changed "background-color: green"
       false -> Remove))
+
+bar :: forall t. Watcher Component Boolean t
+bar =
+  watchingC (Key Nil) case _ of
+    true ->
+      Changed $ TagNode
+        { tag: "button"
+        , properties: foo : Nil
+        , children: the TextNode "Howdy" : Nil
+        }
+
+    false ->
+      Changed (TextNode "What")
 
