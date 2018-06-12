@@ -16,7 +16,8 @@
     "purescript-behaviors": "justinwoo/purescript-behaviors#compiler/0.12",
     "purescript-effect": "2.0.0",
     "purescript-web-html": "^1.0.0",
-    "purescript-web-events": "^1.0.0"
+    "purescript-web-events": "^1.0.0",
+    "purescript-functions": "^4.0.0"
   },
   "devDependencies": {
     "purescript-psci-support": "^4.0.0"
